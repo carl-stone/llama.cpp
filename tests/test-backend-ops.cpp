@@ -13025,6 +13025,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     std::vector<std::unique_ptr<test_case>> test_cases;
 
+    // arc-dg2: LFM3-1.7B decode / verify matvec shapes, across weight formats (bandwidth per format at equal shape)
+    for (ggml_type type_a : {GGML_TYPE_F16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0, GGML_TYPE_Q4_K, GGML_TYPE_Q6_K}) {
+        for (auto mk : std::vector<std::pair<int64_t, int64_t>>{{7680, 2048}, {2048, 7680}, {2048, 2048}, {128000, 2048}}) {
+            for (int64_t n : {1, 4, 512}) {
+                test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, mk.first, n, mk.second, {1, 1}, {1, 1}));
+            }
+        }
+    }
+
     for (float n : {128.0f, 4096.0f, 32768.0f, 1048576.0f}) {
         test_cases.emplace_back(new test_arange(GGML_TYPE_F32, 0.0f, n, 1.0f));
     }

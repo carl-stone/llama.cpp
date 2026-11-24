@@ -1744,7 +1744,10 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     const bool cm1_use_wave32 = device->vendor_id == VK_VENDOR_ID_AMD &&
                                 device->subgroup_size_control &&
                                 device->subgroup_min_size <= 32 && device->subgroup_max_size >= 32;
-    const uint32_t cm1_sg = cm1_use_wave32 ? 32 : device->subgroup_size;
+    // arc-dg2 experiment knob: int8 coopmat MMQ on Intel Xe1 (DG2), whose DPAS is SIMD8
+    const bool arc_cm1_int = device->vendor_id == VK_VENDOR_ID_INTEL && device->architecture == INTEL_XE1 &&
+                             getenv("GGML_VK_ARC_CM1_INT") != nullptr;
+    const uint32_t cm1_sg = cm1_use_wave32 ? 32 : (arc_cm1_int ? device->subgroup_min_size : device->subgroup_size);
 
     vk_pipeline wait_pipeline;
     CompileTask claimed_task {};
@@ -1891,9 +1894,19 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                 l_align         = 32;  //set as BK
             }
         }
+        // arc-dg2 experiment knob: re-pin coopmat warptiles to a given subgroup size (DG2 DPAS is SIMD8),
+        // keeping NUM_WARPS = BLOCK_SIZE / WARP == (BM / WM) * (BN / WN).
+        if (const char * v = getenv("GGML_VK_ARC_CM1_WARP"); v && device->vendor_id == VK_VENDOR_ID_INTEL && device->coopmat_support) {
+            const uint32_t w = (uint32_t) atoi(v);
+            auto repin = [w](std::vector<uint32_t> & t) {  // {BLOCK_SIZE, BM, BN, BK, WM, WN, WMITER, TM, TN, TK, WARP}
+                t[10] = w;
+                t[0]  = w * (t[1] / t[4]) * (t[2] / t[5]);
+            };
+            repin(l_warptile); repin(m_warptile); repin(l_warptile_mmq); repin(m_warptile_mmq);
+        }
 
         const bool use_cm1_int = device->coopmat_int_support &&
-                                 (device->architecture == AMD_RDNA3 || device->architecture == AMD_RDNA4);
+                                 (device->architecture == AMD_RDNA3 || device->architecture == AMD_RDNA4 || arc_cm1_int);
 
         for (uint32_t i = 0; i < GGML_TYPE_COUNT; ++i) {
             ggml_type t = (ggml_type)i;
@@ -2496,7 +2509,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         }
 #undef X_CM1
 
-        if (device->coopmat_int_support && (rdna3 || rdna4)) {
+        if (device->coopmat_int_support && (rdna3 || rdna4 || arc_cm1_int)) {
             cm1_create_mmq({GGML_TYPE_Q4_0,   GGML_TYPE_Q8_1, false, false}, tc_mmq_cm1_int,   "matmul_q4_0_q8_1",   matmul_q4_0_q8_1_cm1_len,   matmul_q4_0_q8_1_cm1_data,   sizeof(vk_mat_mat_push_constants), 3);
             if (!rdna4) { cm1_create_mmq({GGML_TYPE_Q4_1, GGML_TYPE_Q8_1, false, false}, tc_mmq_cm1_int,   "matmul_q4_1_q8_1",   matmul_q4_1_q8_1_cm1_len,   matmul_q4_1_q8_1_cm1_data,   sizeof(vk_mat_mat_push_constants), 3); }
             cm1_create_mmq({GGML_TYPE_Q5_0,   GGML_TYPE_Q8_1, false, false}, tc_mmq_cm1_int,   "matmul_q5_0_q8_1",   matmul_q5_0_q8_1_cm1_len,   matmul_q5_0_q8_1_cm1_data,   sizeof(vk_mat_mat_push_constants), 3);
@@ -2896,6 +2909,10 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         rm_stdq = 2;
         rm_stdq_int = 2;
     }
+    // arc-dg2 experiment knob: rows per workgroup for the integer-dot (MMVQ) legacy-quant path
+    if (const char * v = getenv("GGML_VK_ARC_RM_STDQ_INT")) {
+        rm_stdq_int = (uint32_t) atoi(v);
+    }
     // RDNA3/4: above four columns, static 4 rows for all types bench faster than the default
     const bool is_rdna3_or_4 = device->vendor_id == VK_VENDOR_ID_AMD && (device->architecture == AMD_RDNA3 || device->architecture == AMD_RDNA4);
     auto const &rm_int_n = [&](uint32_t rows, uint32_t i) { return (is_rdna3_or_4 && i >= 4) ? 4u : rows; };
@@ -3006,7 +3023,8 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
 
 #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
             if (device->integer_dot_product) {
-                const uint32_t subgroup_size_int = (device->vendor_id == VK_VENDOR_ID_INTEL && device->subgroup_size_control) ? device->subgroup_min_size : device->subgroup_size;
+                const uint32_t subgroup_size_int = getenv("GGML_VK_ARC_SG_INT") ? (uint32_t) atoi(getenv("GGML_VK_ARC_SG_INT")) :
+                    ((device->vendor_id == VK_VENDOR_ID_INTEL && device->subgroup_size_control) ? device->subgroup_min_size : device->subgroup_size);
                 const uint32_t wg_size_subgroup_int = (w == DMMV_WG_SIZE_SUBGROUP) ? subgroup_size_int : (subgroup_size_int * 4);
 
                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q2_0][i], "mul_mat_vec_q2_0_q8_1_f32", arr_dmmv_q2_0_q8_1_f32_len[reduc], arr_dmmv_q2_0_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(2*rm_kq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(2*rm_kq_int, i), i+1}, 1, true, use_subgroups, subgroup_size_int);
@@ -3063,7 +3081,8 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
 
 #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
         if (device->integer_dot_product) {
-            const uint32_t subgroup_size_int = (device->vendor_id == VK_VENDOR_ID_INTEL && device->subgroup_size_control) ? device->subgroup_min_size : device->subgroup_size;
+            const uint32_t subgroup_size_int = getenv("GGML_VK_ARC_SG_INT") ? (uint32_t) atoi(getenv("GGML_VK_ARC_SG_INT")) :
+                ((device->vendor_id == VK_VENDOR_ID_INTEL && device->subgroup_size_control) ? device->subgroup_min_size : device->subgroup_size);
             const uint32_t wg_size_subgroup_int = (w == DMMV_WG_SIZE_SUBGROUP) ? subgroup_size_int : (subgroup_size_int * 4);
 
             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_Q2_0], "mul_mat_vec_id_q2_0_q8_1_f32", arr_dmmv_id_q2_0_q8_1_f32_len[reduc], arr_dmmv_id_q2_0_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {rm_id(2*rm_kq_int), 1, 1}, {wg_size_subgroup_int, rm_id(2*rm_kq_int)}, 1, true, use_subgroups, subgroup_size_int);
@@ -5698,7 +5717,7 @@ static vk_pipeline ggml_vk_get_dequantize_mul_mat_vec(ggml_backend_vk_context * 
     }
 
     if (b_type == GGML_TYPE_Q8_1) {
-        if (ctx->device->vendor_id == VK_VENDOR_ID_INTEL) {
+        if (ctx->device->vendor_id == VK_VENDOR_ID_INTEL && !getenv("GGML_VK_ARC_INT_WG_LARGE")) {
             dmmv_wg = DMMV_WG_SIZE_SUBGROUP;
         }
         return ctx->device->pipeline_dequant_mul_mat_vec_q8_1_f32[dmmv_wg][a_type][num_cols-1];
@@ -16573,7 +16592,8 @@ bool ggml_vk_khr_cooperative_matrix_support(const vk::PhysicalDeviceProperties& 
     case VK_VENDOR_ID_INTEL:
         // Only allowing Xe2/Xe3 GPU and integrated Xe GPUs at the moment since older hardware (ex. Arc A770) has performance regressions.
         return (arch == vk_device_architecture::INTEL_XE2) ||
-            (arch == vk_device_architecture::INTEL_XE1 && props.deviceType == vk::PhysicalDeviceType::eIntegratedGpu && driver_props.driverID == vk::DriverId::eIntelProprietaryWindows);
+            (arch == vk_device_architecture::INTEL_XE1 && props.deviceType == vk::PhysicalDeviceType::eIntegratedGpu && driver_props.driverID == vk::DriverId::eIntelProprietaryWindows) ||
+            (arch == vk_device_architecture::INTEL_XE1 && getenv("GGML_VK_ARC_FORCE_COOPMAT") != nullptr);
     case VK_VENDOR_ID_AMD:
         if (driver_props.driverID == vk::DriverId::eAmdProprietary || driver_props.driverID == vk::DriverId::eAmdOpenSource) {
             // Workaround for AMD proprietary driver reporting support on all GPUs

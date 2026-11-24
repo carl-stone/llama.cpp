@@ -1823,17 +1823,21 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         m_warptile_mmq_int = { 128,              64,  64, 32, mm_warp_8,     32, 2, 2, 2, 1, mm_warp_8 };
         s_warptile_mmq_int = { subgroup_size_32, 32,  32, 32, s_warptile_wm_8, 32, 2, 2, 1, 1, subgroup_size_8 };
 
-        const auto cm1_bs = [cm1_sg](uint32_t bm, uint32_t bn) {
-            return cm1_sg * (bm / std::min(cm1_sg, bm)) * (bn / 32);
+        // WM per warp: the subgroup size by default; arc-dg2 knob GGML_VK_ARC_CM1_INT_WM raises it so SIMD8 tiles
+        // keep BLOCK_SIZE small (a 128x128 tile at WM 8 needs 64 subgroups / 512 threads).
+        const uint32_t cm1_wm_env = (arc_cm1_int && getenv("GGML_VK_ARC_CM1_INT_WM")) ? (uint32_t) atoi(getenv("GGML_VK_ARC_CM1_INT_WM")) : 0;
+        const auto cm1_wm = [cm1_sg, cm1_wm_env](uint32_t bm) { return std::min(cm1_wm_env ? cm1_wm_env : cm1_sg, bm); };
+        const auto cm1_bs = [cm1_sg, cm1_wm](uint32_t bm, uint32_t bn) {
+            return cm1_sg * (bm / cm1_wm(bm)) * (bn / 32);
         };
 
-        l_warptile_mmq_cm1_int = { cm1_bs(128, 128), 128, 128, 32, std::min(cm1_sg, 128u), 32, 2, itm, itn, itk, cm1_sg, (uint32_t)device->architecture };
-        m_warptile_mmq_cm1_int = { cm1_bs( 64,  64),  64,  64, 32, std::min(cm1_sg,  64u), 32, 2, itm, itn, itk, cm1_sg, (uint32_t)device->architecture };
-        s_warptile_mmq_cm1_int = { cm1_bs( 32,  32),  32,  32, 32, std::min(cm1_sg,  32u), 32, 2, itm, itn, itk, cm1_sg, (uint32_t)device->architecture };
+        l_warptile_mmq_cm1_int = { cm1_bs(128, 128), 128, 128, 32, cm1_wm(128), 32, 2, itm, itn, itk, cm1_sg, (uint32_t)device->architecture };
+        m_warptile_mmq_cm1_int = { cm1_bs( 64,  64),  64,  64, 32, cm1_wm( 64), 32, 2, itm, itn, itk, cm1_sg, (uint32_t)device->architecture };
+        s_warptile_mmq_cm1_int = { cm1_bs( 32,  32),  32,  32, 32, cm1_wm( 32), 32, 2, itm, itn, itk, cm1_sg, (uint32_t)device->architecture };
 
-        l_warptile_mmq_cm1_int_k = { cm1_bs( 64, 128),  64, 128, 32, std::min(cm1_sg,  64u), 32, 2, itm, itn, itk, cm1_sg, (uint32_t)device->architecture };
-        m_warptile_mmq_cm1_int_k = { cm1_bs( 64,  64),  64,  64, 32, std::min(cm1_sg,  64u), 32, 2, itm, itn, itk, cm1_sg, (uint32_t)device->architecture };
-        s_warptile_mmq_cm1_int_k = { cm1_bs( 32,  32),  32,  32, 32, std::min(cm1_sg,  32u), 32, 2, itm, itn, itk, cm1_sg, (uint32_t)device->architecture };
+        l_warptile_mmq_cm1_int_k = { cm1_bs( 64, 128),  64, 128, 32, cm1_wm( 64), 32, 2, itm, itn, itk, cm1_sg, (uint32_t)device->architecture };
+        m_warptile_mmq_cm1_int_k = { cm1_bs( 64,  64),  64,  64, 32, cm1_wm( 64), 32, 2, itm, itn, itk, cm1_sg, (uint32_t)device->architecture };
+        s_warptile_mmq_cm1_int_k = { cm1_bs( 32,  32),  32,  32, 32, cm1_wm( 32), 32, 2, itm, itn, itk, cm1_sg, (uint32_t)device->architecture };
 
         l_mmq_cm1_wg_denoms_k = { l_warptile_mmq_cm1_int_k[1], l_warptile_mmq_cm1_int_k[2], 1 };
         m_mmq_cm1_wg_denoms_k = { m_warptile_mmq_cm1_int_k[1], m_warptile_mmq_cm1_int_k[2], 1 };
@@ -1971,6 +1975,13 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                 device->mul_mat_l_int[i] = false;
             } else if (!int_shmem_support(l_int, false)) {
                 device->mul_mat_l_int[i] = false;
+            }
+            // arc-dg2 experiment knob: restrict int matmul tiles, e.g. GGML_VK_ARC_INT_TILES=s or sm
+            if (const char * v = getenv("GGML_VK_ARC_INT_TILES")) {
+                const std::string m(v);
+                if (m.find('s') == std::string::npos) device->mul_mat_s_int[i] = false;
+                if (m.find('m') == std::string::npos) device->mul_mat_m_int[i] = false;
+                if (m.find('l') == std::string::npos) device->mul_mat_l_int[i] = false;
             }
 
             if (!int_shmem_support(s_intid, true)) {

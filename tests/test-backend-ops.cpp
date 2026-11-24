@@ -10312,6 +10312,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     std::vector<std::unique_ptr<test_case>> test_cases;
     std::default_random_engine rng(0);
 
+    // arc-dg2: model-sized quantized matmuls (LFM3-1.7B prefill shapes) so large mul_mm/mmq tiles are exercised
+    for (ggml_type type_a : {GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
+        for (auto mk : std::vector<std::pair<int64_t, int64_t>>{{512, 2048}, {2048, 2048}, {7680, 2048}, {2048, 7680}, {6144, 2048}, {16, 2048}}) {
+            for (int64_t n : {1, 4, 64, 133, 512}) {
+                test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, mk.first, n, mk.second, {1, 1}, {1, 1}));
+            }
+        }
+    }
+
     // unary ops
     // TODO: add GGML_UNARY_OP_SOFTPLUS test that is sensitive to using `log1p(exp(x))` vs `log(exp(x) + 1)`
     for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_BF16}) {

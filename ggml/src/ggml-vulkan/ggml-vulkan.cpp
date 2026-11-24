@@ -1213,6 +1213,11 @@ static vk_fa_tuning_params get_fa_tuning_params_scalar(const vk_device& device, 
         // Disable subgroup use due to performance issues when enforcing subgroup sizes
         result.subgroup_size = 32;
         result.disable_subgroups = true;
+        // arc-dg2 experiment knob: re-enable subgroup reductions at a given subgroup size
+        if (const char * v = getenv("GGML_VK_ARC_FA_SG")) {
+            result.subgroup_size = (uint32_t) atoi(v);
+            result.disable_subgroups = false;
+        }
     } else if (device->vendor_id == VK_VENDOR_ID_AMD && device->architecture != AMD_GCN) {
         result.subgroup_size = n_rows < 4 ? 32 : device->subgroup_size;
     } else {
@@ -1225,7 +1230,9 @@ static vk_fa_tuning_params get_fa_tuning_params_scalar(const vk_device& device, 
         row_split_max_hsk = n_rows <= 8 ? 64 : 128;
     }
     result.row_split = (n_rows < 4 || hsk <= row_split_max_hsk) ? 1 : 4;
-
+    if (const char * v = getenv("GGML_VK_ARC_FA_ROWSPLIT"); v && n_rows >= 4) {
+        result.row_split = (uint32_t) atoi(v);
+    }
     if (result.subgroup_size > 32 && (n_rows < 4 || hsk < (result.row_split == 1 ? 128 : 64))) {
         result.workgroup_size = result.subgroup_size * 2;
     } else {
@@ -1245,9 +1252,22 @@ static vk_fa_tuning_params get_fa_tuning_params_scalar(const vk_device& device, 
             result.block_rows = n_rows == 2 ? 2 : ((n_rows <= 4 || reduce_block_rows) ? 4 : 8);
         } else {
             result.block_rows = n_rows <= 4 ? 4 : ((n_rows <= 8 || reduce_block_rows) ? 8 : 16);
+            // Intel Xe1 (Arc A-series, DG2): 4-row blocks are 23-31% faster than 8 for hsk=hsv=128 prefill
+            // (Arc A380, Mesa ANV, nb=512, kv 4K-32K)
+            if (device->architecture == INTEL_XE1) {
+                result.block_rows = 4;
+            }
         }
 
         result.block_cols = (D & 8) ? 64 : 32;
+    }
+
+    // arc-dg2 experiment knobs: scalar FA tile sizes for multi-row (prefill/verify) batches
+    if (const char * v = getenv("GGML_VK_ARC_FA_ROWS"); v && n_rows > 1) {
+        result.block_rows = (uint32_t) atoi(v);
+    }
+    if (const char * v = getenv("GGML_VK_ARC_FA_COLS"); v && n_rows > 1) {
+        result.block_cols = (uint32_t) atoi(v);
     }
 
     const uint32_t D_lsb = D ^ (D & (D-1));  // extract lowest set bit

@@ -10320,6 +10320,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             }
         }
     }
+    // arc-dg2: LFM3-1.7B attention (head 128, 4 kv heads x 4 q per kv) at prefill/verify/decode row counts
+    for (int64_t kv : {512, 4096}) {
+        for (int64_t nb : {1, 4, 64, 512}) {
+            test_cases.emplace_back(new test_flash_attn_ext(128, 128, 4, {4, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+        }
+    }
 
     // unary ops
     // TODO: add GGML_UNARY_OP_SOFTPLUS test that is sensitive to using `log1p(exp(x))` vs `log(exp(x) + 1)`
@@ -13040,6 +13046,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
             for (int64_t n : {1, 4, 512}) {
                 test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, mk.first, n, mk.second, {1, 1}, {1, 1}));
             }
+        }
+    }
+    for (int64_t kv : {4096, 16384, 32768}) {
+        for (int64_t nb : {1, 512}) {
+            test_cases.emplace_back(new test_flash_attn_ext(128, 128, 4, {4, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
         }
     }
 
